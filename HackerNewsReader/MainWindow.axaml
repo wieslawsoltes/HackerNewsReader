@@ -1,0 +1,17 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        x:Class="HackerNewsReader.MainWindow"
+        Title="Hacker News Reader">
+    <DockPanel>
+        <!-- Header: smaller padding, dark HN orange background -->
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Background="#FF6600">
+            <Button Name="HamburgerButton" Content="☰" Background="Transparent" Foreground="White" BorderThickness="0" Width="30" Click="HamburgerButton_Click"/>
+            <TextBlock Text="Hacker News Reader" Foreground="White" VerticalAlignment="Center" Margin="10,0,0,0" FontSize="18"/>
+        </StackPanel>
+        <!-- Content area: this ContentControl is swapped between feed and detail views -->
+        <ContentControl Name="ContentArea"/>
+    </DockPanel>
+</Window>
