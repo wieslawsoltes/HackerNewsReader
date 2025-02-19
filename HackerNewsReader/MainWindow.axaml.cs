@@ -1,17 +1,20 @@
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Documents;
 using Avalonia.Controls.Primitives;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Avalonia.Controls.Templates;
-using Avalonia.Layout;
 
 namespace HackerNewsReader
 {
@@ -26,6 +29,8 @@ namespace HackerNewsReader
         private ObservableCollection<HNItem> _feedItems = new ObservableCollection<HNItem>();
         private ListBox _feedListBox;
         private const string API_BASE = "https://hacker-news.firebaseio.com/v0";
+        // Store the feed view so that we don't reload it when coming back from detail view.
+        private Control _feedView;
 
         public MainWindow()
         {
@@ -38,12 +43,14 @@ namespace HackerNewsReader
 
         /// <summary>
         /// Creates the feed view – a ListBox wrapped in a ScrollViewer.
+        /// The created view is stored in _feedView so that we can return to it without reloading.
         /// </summary>
         private void LoadFeedView()
         {
             _feedItems.Clear();
             _topStoryIds.Clear();
             _currentIndex = 0;
+
             // Create the ListBox with a simple DataTemplate for each story.
             _feedListBox = new ListBox
             {
@@ -51,18 +58,21 @@ namespace HackerNewsReader
                 ItemTemplate = new FuncDataTemplate<HNItem>((item, _) =>
                 {
                     var panel = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(5) };
+
                     var titleText = new TextBlock
                     {
                         Text = item.title,
                         FontWeight = FontWeight.Bold,
                         TextWrapping = TextWrapping.Wrap
                     };
+
                     var metaText = new TextBlock
                     {
                         Text = $"by {item.by} | {UnixTimeToDateTime(item.time)} | {item.score} points | {(item.kids != null ? item.kids.Count : 0)} comments",
                         FontSize = 12,
                         Foreground = Brushes.Gray
                     };
+
                     panel.Children.Add(titleText);
                     panel.Children.Add(metaText);
                     return panel;
@@ -77,7 +87,9 @@ namespace HackerNewsReader
                 Content = _feedListBox
             };
             scrollViewer.ScrollChanged += ScrollViewer_ScrollChanged;
-            ContentArea.Content = scrollViewer;
+
+            _feedView = scrollViewer;
+            ContentArea.Content = _feedView;
 
             _ = LoadStoriesAsync();
         }
@@ -171,16 +183,17 @@ namespace HackerNewsReader
         /// <summary>
         /// Loads the detail view for a story – shows its title, meta, optional URL and text, and then its comments.
         /// Comments are loaded asynchronously and appended as soon as each is available.
+        /// HTML tags in story text (if any) are converted to inlines.
         /// </summary>
         private async void LoadDetailView(HNItem story)
         {
-            // Clear selection
+            // Clear selection so that returning back doesn’t trigger a new detail load.
             _feedListBox.SelectedItem = null;
             var detailPanel = new StackPanel { Margin = new Thickness(10), Spacing = 10 };
 
-            // Back button to return to feed view.
+            // Back button to return to the feed view without reloading it.
             var backButton = new Button { Content = "← Back to Feed" };
-            backButton.Click += (s, e) => { LoadFeedView(); };
+            backButton.Click += (s, e) => { ContentArea.Content = _feedView; };
             detailPanel.Children.Add(backButton);
 
             var titleText = new TextBlock
@@ -200,16 +213,38 @@ namespace HackerNewsReader
             };
             detailPanel.Children.Add(metaText);
 
+            // If a URL is provided, add a "Read more" hyperlink.
             if (!string.IsNullOrEmpty(story.url))
             {
-                // For simplicity, we just show the text; adding hyperlink support is possible.
-                var linkText = new TextBlock { Text = "Read more", Foreground = Brushes.Blue };
-                detailPanel.Children.Add(linkText);
+                var readMoreTextBlock = new TextBlock { TextWrapping = TextWrapping.Wrap };
+                var hyperlink = new Hyperlink(new Run("Read more"))
+                {
+                    NavigateUri = new Uri(story.url)
+                };
+                hyperlink.Click += (s, args) =>
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo { FileName = story.url, UseShellExecute = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Error opening link: {ex}");
+                    }
+                };
+                readMoreTextBlock.Inlines.Add(hyperlink);
+                detailPanel.Children.Add(readMoreTextBlock);
             }
+
+            // If the story has text (e.g. Ask HN posts), convert any HTML in it to inlines.
             if (!string.IsNullOrEmpty(story.text))
             {
-                var storyText = new TextBlock { Text = story.text, TextWrapping = TextWrapping.Wrap };
-                detailPanel.Children.Add(storyText);
+                var storyTextBlock = new TextBlock { TextWrapping = TextWrapping.Wrap };
+                foreach (var inline in ParseHtmlToInlines(story.text))
+                {
+                    storyTextBlock.Inlines.Add(inline);
+                }
+                detailPanel.Children.Add(storyTextBlock);
             }
 
             // Comments header.
@@ -244,6 +279,7 @@ namespace HackerNewsReader
 
         /// <summary>
         /// Loads a comment (and its nested replies recursively) and appends it to the parent panel.
+        /// HTML in the comment text is converted to inlines.
         /// </summary>
         private async Task LoadCommentAsync(int commentId, Panel parentPanel)
         {
@@ -255,6 +291,7 @@ namespace HackerNewsReader
                 if (comment != null && !comment.deleted && !comment.dead)
                 {
                     var commentPanel = new StackPanel { Margin = new Thickness(20, 5, 0, 5) };
+
                     var meta = new TextBlock
                     {
                         Text = $"by {comment.by} | {UnixTimeToDateTime(comment.time)}",
@@ -262,12 +299,14 @@ namespace HackerNewsReader
                         Foreground = Brushes.Gray
                     };
                     commentPanel.Children.Add(meta);
-                    var text = new TextBlock
+
+                    var commentTextBlock = new TextBlock { TextWrapping = TextWrapping.Wrap };
+                    foreach (var inline in ParseHtmlToInlines(comment.text))
                     {
-                        Text = comment.text,
-                        TextWrapping = TextWrapping.Wrap
-                    };
-                    commentPanel.Children.Add(text);
+                        commentTextBlock.Inlines.Add(inline);
+                    }
+                    commentPanel.Children.Add(commentTextBlock);
+
                     await Dispatcher.UIThread.InvokeAsync(() =>
                     {
                         parentPanel.Children.Add(commentPanel);
@@ -294,11 +333,67 @@ namespace HackerNewsReader
         }
 
         /// <summary>
-        /// Handles the hamburger button click by opening a native menu for feed commands.
+        /// A simple HTML parser that converts basic HTML (supports <br> and <a href="…"> links) into a list of Inline objects.
+        /// Note: This parser is naïve and may not handle nested or complex HTML.
+        /// </summary>
+        private IEnumerable<Inline> ParseHtmlToInlines(string html)
+        {
+            var inlines = new List<Inline>();
+
+            if (string.IsNullOrEmpty(html))
+                return inlines;
+
+            // Replace <br> tags with newline.
+            html = html.Replace("<br>", "\n")
+                       .Replace("<br/>", "\n")
+                       .Replace("<br />", "\n");
+
+            // Regular expression to match <a href="…">text</a>
+            var regex = new Regex(@"<a\s+href=[""'](?<url>[^""']+)[""']\s*>(?<text>.*?)</a>", RegexOptions.IgnoreCase);
+            int lastIndex = 0;
+            foreach (Match match in regex.Matches(html))
+            {
+                // Add text before the hyperlink.
+                if (match.Index > lastIndex)
+                {
+                    string textBefore = html.Substring(lastIndex, match.Index - lastIndex);
+                    inlines.Add(new Run(textBefore));
+                }
+                string url = match.Groups["url"].Value;
+                string linkText = match.Groups["text"].Value;
+                var hyperlink = new Hyperlink(new Run(linkText))
+                {
+                    NavigateUri = new Uri(url)
+                };
+                hyperlink.Click += (s, e) =>
+                {
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Error opening link: {ex}");
+                    }
+                };
+                inlines.Add(hyperlink);
+                lastIndex = match.Index + match.Length;
+            }
+            // Append any trailing text.
+            if (lastIndex < html.Length)
+            {
+                string trailing = html.Substring(lastIndex);
+                inlines.Add(new Run(trailing));
+            }
+            return inlines;
+        }
+
+        /// <summary>
+        /// Handles the hamburger button click by opening a ContextMenu with feed commands.
         /// </summary>
         private void HamburgerButton_Click(object sender, RoutedEventArgs e)
         {
-            // Create menu items
+            // Create menu items.
             var refreshItem = new MenuItem { Header = "Refresh" };
             refreshItem.Click += (s, args) => { LoadFeedView(); };
 
@@ -344,7 +439,7 @@ namespace HackerNewsReader
                 LoadFeedView();
             };
 
-            // Create the context menu and add a separator between Refresh and the feed items.
+            // Create the ContextMenu and add a separator between Refresh and the feed items.
             var contextMenu = new ContextMenu
             {
                 ItemsSource = new List<object>
@@ -364,7 +459,6 @@ namespace HackerNewsReader
             if (sender is Control btn)
             {
                 contextMenu.PlacementTarget = btn;
-                // Pass the button as a parameter to Open() so it knows what to anchor to.
                 contextMenu.Open(btn);
             }
         }
